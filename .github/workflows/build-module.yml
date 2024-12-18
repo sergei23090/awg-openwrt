@@ -6,48 +6,65 @@ on:
 
 jobs:
   build:
-    name: "v${{ matrix.build_env.tag }} - ${{ matrix.build_env.pkgarch}} :: ${{ matrix.build_env.target}}/${{ matrix.build_env.subtarget}} build"
+    name: "Build kmod-amneziawg for NanoPi-R3S (23.05)"
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        build_env:
-          - tag: "23.05.5"
-            pkgarch: aarch64_generic
-            target: rockchip
-            subtarget: armv8
-            # vermagic: "0919bf77bd78281b8293e21504faecfb" # Удалено, так как теперь не проверяем статически
-
     steps:
-      - name: Checkout FriendlyWrt Repository
-        uses: actions/checkout@v4
-        with:
-          repository: friendlyarm/friendlywrt
-          ref: master-v23.05
-          fetch-depth: 0
-
-      - name: Cache Tools and Kernel
-        id: cache-tools-kernel
-        uses: actions/cache@v4
+      - name: Setup Build Environment
         env:
-          cache-name: "cache-tools-kernel-${{ matrix.build_env.tag }}-${{ matrix.build_env.pkgarch}}-${{ matrix.build_env.target}}-${{ matrix.build_env.subtarget}}"
-        with:
-          path: "**"
-          key: ${{ runner.os }}-build-vm4-${{ env.cache-name }}
-          restore-keys: |
-            ${{ runner.os }}-build-vm4-cache-tools-kernel-${{ matrix.build_env.tag }}-${{ matrix.build_env.pkgarch}}-
-
-      - name: Building kernel and tools
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          echo "pkgarch: ${{ matrix.build_env.pkgarch}}, target:${{ matrix.build_env.target}}, subtarget: ${{ matrix.build_env.subtarget}}"
+          sudo rm -rf /etc/apt/sources.list.d
+          sudo apt-get update
+          sudo apt-get install -y git python2.7 wget unzip
+          # Приведение python к python2.7, если это нужно
+          sudo update-alternatives --install /usr/bin/python python /usr/bin/python2.7 20
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "noreply@github.com"
+          git clone https://github.com/friendlyarm/repo
+          sudo cp repo/repo /usr/bin/
+          mkdir project
 
-          # Setup & install feeds
+      - name: Download Source (same as build_img for rk3566 and VERSION=23.05)
+        run: |
+          cd project
+          # Инициализируем репо так же, как для сборки образа NanoPi-R3S
+          repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v23.05 \
+                    -m rk3566.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
+          repo sync -c kernel --no-clone-bundle
+          repo sync -c u-boot --no-clone-bundle
+          repo sync -c rkbin --no-clone-bundle
+          repo sync -c configs --no-clone-bundle
+          repo sync -c device/common --no-clone-bundle
+          repo sync -c device/friendlyelec --no-clone-bundle
+          repo sync -c scripts --no-clone-bundle
+          repo sync -c scripts/sd-fuse --no-clone-bundle
+          repo sync -c toolchain --no-clone-bundle
+
+      - name: Build Kernel
+        run: |
+          cd project
+          # Подготовим конфигурацию так же, как в сборке образа (rockchip для 23.05)
+          # Обычно build.sh friendlywrt сделает нужные конфиги, но нам нужно ядро.
+          # Здесь можно использовать аналогичные шаги, как в build_img, чтобы подготовить .current_config.mk.
+          # Для rk3566 в build_img используется CONFIG=rockchip без суффиксов.
+          echo ". device/friendlyelec/rk3566/base.mk" > .current_config.mk
+          echo "TARGET_IMAGE_DIRNAME=friendlywrt23" >> .current_config.mk
+          echo "TARGET_FRIENDLYWRT_CONFIG=rockchip" >> .current_config.mk
+          # Сборка ядра
+          ./build.sh kernel
+
+      - name: Prepare Feeds and Config
+        run: |
+          cd project/friendlywrt
           echo "src-git awgopenwrt https://github.com/yury-sannikov/awg-openwrt.git" >> ./feeds.conf.default
           ./scripts/feeds update -a && ./scripts/feeds install -a
 
-          # Setup config with AWG and dependencies
+          # Очистим .config и добавим нужные пакеты
           cp /dev/null .config
-          echo "CONFIG_TARGET_${{ matrix.build_env.target }}=y" >> .config
-          echo "CONFIG_TARGET_${{ matrix.build_env.target }}_${{ matrix.build_env.subtarget }}=y" >> .config
+          # Так как мы уже собрали ядро через build.sh kernel, конфигурация TARGET уже зафиксирована в исходниках.
+          # Убедимся, что target rockchip/armv8 соответствует rk3566 (для NanoPi-R3S обычно armv8).
+          echo "CONFIG_TARGET_rockchip=y" >> .config
+          echo "CONFIG_TARGET_rockchip_armv8=y" >> .config
           echo "CONFIG_PACKAGE_kmod-amneziawg=m" >> .config
           echo "CONFIG_PACKAGE_amneziawg-tools=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-amneziawg=y" >> .config
@@ -56,40 +73,32 @@ jobs:
           echo "CONFIG_PACKAGE_kmod-crypto-chacha20poly1305=m" >> .config
 
           make defconfig
-
-          echo "    > make tools/install"
+          # Компилируем toolchain и linux target чтобы убедиться в совпадении vermagic
           FORCE_UNSAFE_CONFIGURE=1 make tools/install -j$(nproc)
-
-          echo "    > make toolchain/install"
           FORCE_UNSAFE_CONFIGURE=1 make toolchain/install -j$(nproc)
-
-          echo "    > make target/linux/compile"
           FORCE_UNSAFE_CONFIGURE=1 make target/linux/compile -j$(nproc) V=s
 
-          # Проверка vermagic удалена, мы теперь не сравниваем его со статическим значением
+      - name: Build Modules
+        run: |
+          cd project/friendlywrt
           VERMAGIC=`cat ./build_dir/target-*/linux-*/linux-*/.vermagic`
           echo "Kernel Vermagic: $VERMAGIC"
 
-      - name: Build AmneziaWG
-        run: |
-          VERMAGIC=`cat ./build_dir/target-*/linux-*/linux-*/.vermagic`
-          echo "Vermagic: $VERMAGIC"
-
-          # Compile AWG modules and tools
-          make package/kmod-amneziawg/{clean,compile} V=s || true
+          make package/kmod-amneziawg/{clean,compile} V=s
           make package/luci-app-amneziawg/{clean,compile} V=s
           make package/amneziawg-tools/{clean,compile} V=s
 
       - name: Prepare artifacts
         run: |
-          tag_name=${{ github.ref_name }}
+          cd project/friendlywrt
+          tag_name=${GITHUB_REF_NAME}
           mkdir -p awgrelease
-          postfix="${tag_name}_v${{ matrix.build_env.tag }}_${{ matrix.build_env.pkgarch}}_${{ matrix.build_env.target}}_${{ matrix.build_env.subtarget}}"
-          cp bin/packages/${{ matrix.build_env.pkgarch }}/awgopenwrt/amneziawg-tools_*.ipk awgrelease/amneziawg-tools_${postfix}.ipk
-          cp bin/packages/${{ matrix.build_env.pkgarch }}/awgopenwrt/luci-app-amneziawg_*.ipk awgrelease/luci-app-amneziawg_${postfix}.ipk
-          cp bin/targets/${{ matrix.build_env.target}}/${{ matrix.build_env.subtarget}}/packages/kmod-amneziawg_*.ipk awgrelease/kmod-amneziawg_${postfix}.ipk
+          postfix="${tag_name}_v23.05.5_aarch64_generic_rockchip_armv8"
+          cp bin/packages/aarch64_generic/awgopenwrt/amneziawg-tools_*.ipk awgrelease/amneziawg-tools_${postfix}.ipk
+          cp bin/packages/aarch64_generic/awgopenwrt/luci-app-amneziawg_*.ipk awgrelease/luci-app-amneziawg_${postfix}.ipk
+          cp bin/targets/rockchip/armv8/packages/kmod-amneziawg_*.ipk awgrelease/kmod-amneziawg_${postfix}.ipk
 
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
-          files: awgrelease/*.ipk
+          files: project/friendlywrt/awgrelease/*.ipk
