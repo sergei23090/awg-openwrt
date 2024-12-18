@@ -1,5 +1,4 @@
 name: Create Release on Tag
-# on: [workflow_dispatch]
 on:
   push:
     tags:
@@ -18,10 +17,11 @@ jobs:
             subtarget: armv8
             vermagic: "0919bf77bd78281b8293e21504faecfb"
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout FriendlyWrt Repository
+        uses: actions/checkout@v4
         with:
-          repository: openwrt/openwrt
-          ref: v${{ matrix.build_env.tag }}
+          repository: friendlyarm/friendlywrt
+          ref: master-v23.05
           fetch-depth: 0
 
       - name: Cache Tools and Kernel
@@ -36,17 +36,17 @@ jobs:
             ${{ runner.os }}-build-vm4-cache-tools-kernel-${{ matrix.build_env.tag }}-${{ matrix.build_env.pkgarch}}-
 
       - name: Building kernel and tools
-        #if: ${{ steps.cache-tools-kernel.outputs.cache-hit != 'true' }}
         run: |
           echo "pkgarch: ${{ matrix.build_env.pkgarch}}, target:${{ matrix.build_env.target}}, subtarget: ${{ matrix.build_env.subtarget}}"
 
           # Setup & install feeds
-          wget https://downloads.openwrt.org/releases/${{ matrix.build_env.tag }}/targets/${{ matrix.build_env.target}}/${{ matrix.build_env.subtarget}}/feeds.buildinfo -O feeds.conf
-          echo "src-git awgopenwrt https://github.com/yury-sannikov/awg-openwrt.git" >> ./feeds.conf
-          ./scripts/feeds update && ./scripts/feeds install -a
+          echo "src-git awgopenwrt https://github.com/yury-sannikov/awg-openwrt.git" >> ./feeds.conf.default
+          ./scripts/feeds update -a && ./scripts/feeds install -a
 
           # Setup config with AWG and dependencies
-          wget https://downloads.openwrt.org/releases/${{ matrix.build_env.tag }}/targets/${{ matrix.build_env.target}}/${{ matrix.build_env.subtarget}}/config.buildinfo -O .config
+          cp /dev/null .config
+          echo "CONFIG_TARGET_${{ matrix.build_env.target }}=y" >> .config
+          echo "CONFIG_TARGET_${{ matrix.build_env.target }}_${{ matrix.build_env.subtarget }}=y" >> .config
           echo "CONFIG_PACKAGE_kmod-amneziawg=m" >> .config
           echo "CONFIG_PACKAGE_amneziawg-tools=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-amneziawg=y" >> .config
@@ -57,18 +57,13 @@ jobs:
           make defconfig
 
           echo "    > make tools/install"
-          make tools/install -i -j `nproc`
-
-          cat ./build_dir/target-*/linux-*/linux-*/.vermagic || true
+          FORCE_UNSAFE_CONFIGURE=1 make tools/install -j$(nproc)
 
           echo "    > make toolchain/install"
-          make toolchain/install  -i -j `nproc`
+          FORCE_UNSAFE_CONFIGURE=1 make toolchain/install -j$(nproc)
 
-          cat ./build_dir/target-*/linux-*/linux-*/.vermagic || true
-
-          # compile kernel module
           echo "    > make target/linux/compile"
-          make target/linux/compile  -i -j `nproc` V=s
+          FORCE_UNSAFE_CONFIGURE=1 make target/linux/compile -j$(nproc) V=s
 
           VERMAGIC=`cat ./build_dir/target-*/linux-*/linux-*/.vermagic`
           VERMAGIC_EXPECTED=${{ matrix.build_env.vermagic }}
@@ -90,15 +85,10 @@ jobs:
             exit 1
           fi
 
-          # Ignore kmod build for some targets, replace with the awg-go
-          make package/kmod-amneziawg/{clean,download,prepare} V=s || true
-          make package/kmod-amneziawg/compile V=s || true
-
-          make package/luci-app-amneziawg/{clean,download,prepare}
-          make package/luci-app-amneziawg/compile V=s
-
-          make V=s package/amneziawg-tools/{clean,download,prepare}
-          make V=s package/amneziawg-tools/compile
+          # Compile AWG modules and tools
+          make package/kmod-amneziawg/{clean,compile} V=s || true
+          make package/luci-app-amneziawg/{clean,compile} V=s
+          make package/amneziawg-tools/{clean,compile} V=s
 
       - name: Prepare artifacts
         run: |
@@ -113,4 +103,3 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: awgrelease/*.ipk
-
