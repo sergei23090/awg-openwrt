@@ -16,7 +16,7 @@ jobs:
           sudo rm -rf /etc/apt/sources.list.d
           sudo apt-get update
           sudo apt-get install -y git python2.7 wget unzip
-          # Приведение python к python2.7, если это нужно
+          # Приведение python к python2.7, если нужно
           sudo update-alternatives --install /usr/bin/python python /usr/bin/python2.7 20
           git config --global user.name "GitHub Actions"
           git config --global user.email "noreply@github.com"
@@ -40,17 +40,19 @@ jobs:
           repo sync -c scripts/sd-fuse --no-clone-bundle
           repo sync -c toolchain --no-clone-bundle
 
-      - name: Build Kernel
+      - name: Prepare Config and Build FriendlyWrt Base
         run: |
           cd project
-          # Подготовим конфигурацию так же, как в сборке образа (rockchip для 23.05)
-          # Обычно build.sh friendlywrt сделает нужные конфиги, но нам нужно ядро.
-          # Здесь можно использовать аналогичные шаги, как в build_img, чтобы подготовить .current_config.mk.
-          # Для rk3566 в build_img используется CONFIG=rockchip без суффиксов.
           echo ". device/friendlyelec/rk3566/base.mk" > .current_config.mk
           echo "TARGET_IMAGE_DIRNAME=friendlywrt23" >> .current_config.mk
           echo "TARGET_FRIENDLYWRT_CONFIG=rockchip" >> .current_config.mk
-          # Сборка ядра
+          # Собираем базовый friendlywrt
+          ./build.sh friendlywrt
+          # Теперь директория friendlywrt создана
+
+      - name: Build Kernel
+        run: |
+          cd project
           ./build.sh kernel
 
       - name: Prepare Feeds and Config
@@ -61,8 +63,6 @@ jobs:
 
           # Очистим .config и добавим нужные пакеты
           cp /dev/null .config
-          # Так как мы уже собрали ядро через build.sh kernel, конфигурация TARGET уже зафиксирована в исходниках.
-          # Убедимся, что target rockchip/armv8 соответствует rk3566 (для NanoPi-R3S обычно armv8).
           echo "CONFIG_TARGET_rockchip=y" >> .config
           echo "CONFIG_TARGET_rockchip_armv8=y" >> .config
           echo "CONFIG_PACKAGE_kmod-amneziawg=m" >> .config
@@ -73,7 +73,6 @@ jobs:
           echo "CONFIG_PACKAGE_kmod-crypto-chacha20poly1305=m" >> .config
 
           make defconfig
-          # Компилируем toolchain и linux target чтобы убедиться в совпадении vermagic
           FORCE_UNSAFE_CONFIGURE=1 make tools/install -j$(nproc)
           FORCE_UNSAFE_CONFIGURE=1 make toolchain/install -j$(nproc)
           FORCE_UNSAFE_CONFIGURE=1 make target/linux/compile -j$(nproc) V=s
