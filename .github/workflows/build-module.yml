@@ -17,13 +17,31 @@ jobs:
             subtarget: armv8
 
     steps:
-      - name: Checkout Repository
+      # 1. Checkout FriendlyWrt Repository
+      - name: Checkout FriendlyWrt Repository
         uses: actions/checkout@v4
         with:
           repository: friendlyarm/friendlywrt
           ref: master-v23.05
+          path: friendlywrt
           fetch-depth: 0
 
+      # 2. Checkout Your Own Repository (for custom scripts)
+      - name: Checkout Custom Scripts Repository
+        uses: actions/checkout@v4
+        with:
+          # Если кастомные скрипты находятся в той же репозитории, что и этот workflow,
+          # то этот шаг можно удалить. В противном случае укажите другую репозиторий.
+          # Например:
+          # repository: your-username/your-repo
+          # Если скрипты в той же репозитории:
+          # path: custom-scripts
+          # Для примера предположим, что они в той же репозитории:
+          repository: ${{ github.repository }}
+          path: custom-scripts
+          fetch-depth: 0
+
+      # 3. Setup Build Environment
       - name: Setup Build Environment
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -45,12 +63,12 @@ jobs:
           sudo chmod +x /usr/bin/repo
           rm -rf /tmp/repo
 
-          # Подготовка рабочей директории
-          mkdir -p /work/project
-
+      # 4. Download Source
       - name: Download Source
         run: |
-          cd /work/project
+          cd friendlywrt
+          mkdir -p project
+          cd project
           repo init --depth=1 -u https://github.com/friendlyarm/friendlywrt_manifests -b master-v${{ matrix.build_env.tag }} \
                     -m rk3566.xml --repo-url=https://github.com/friendlyarm/repo --no-clone-bundle
           repo sync -c kernel --no-clone-bundle
@@ -63,16 +81,18 @@ jobs:
           repo sync -c scripts/sd-fuse --no-clone-bundle
           repo sync -c toolchain --no-clone-bundle
 
+      # 5. Apply Customizations
       - name: Apply Customizations
         run: |
-          cd /work/project
-          # Предполагается, что скрипты находятся в корне репозитория после checkout
-          source ../scripts/add_packages.sh
-          source ../scripts/custome_config.sh
+          cd friendlywrt/project
+          # Предполагается, что скрипты находятся в директории custom-scripts
+          source ../../custom-scripts/add_packages.sh
+          source ../../custom-scripts/custome_config.sh
 
+      # 6. Prepare Config and Build FriendlyWrt Base
       - name: Prepare Config and Build FriendlyWrt Base
         run: |
-          cd /work/project
+          cd friendlywrt/project
           echo ". device/friendlyelec/rk3566/base.mk" > .current_config.mk
           echo "TARGET_IMAGE_DIRNAME=friendlywrt23" >> .current_config.mk
           echo "TARGET_FRIENDLYWRT_CONFIG=rockchip" >> .current_config.mk
@@ -80,14 +100,24 @@ jobs:
           # Собираем базовый friendlywrt
           ./build.sh friendlywrt
 
+      # 7. Verify FriendlyWrt Directory
+      - name: Verify FriendlyWrt Directory
+        run: |
+          if [ ! -d friendlywrt/project/friendlywrt ]; then
+            echo "Error: friendlywrt directory not found!"
+            exit 1
+          fi
+
+      # 8. Build Kernel
       - name: Build Kernel
         run: |
-          cd /work/project
+          cd friendlywrt/project
           ./build.sh kernel
 
+      # 9. Prepare Feeds and Config
       - name: Prepare Feeds and Config
         run: |
-          cd /work/project/friendlywrt
+          cd friendlywrt/project/friendlywrt
           echo "src-git awgopenwrt https://github.com/yury-sannikov/awg-openwrt.git" >> ./feeds.conf.default
           ./scripts/feeds update -a && ./scripts/feeds install -a
 
@@ -107,9 +137,10 @@ jobs:
           FORCE_UNSAFE_CONFIGURE=1 make toolchain/install -j$(nproc)
           FORCE_UNSAFE_CONFIGURE=1 make target/linux/compile -j$(nproc) V=s
 
+      # 10. Build Modules
       - name: Build Modules
         run: |
-          cd /work/project/friendlywrt
+          cd friendlywrt/project/friendlywrt
           VERMAGIC=$(cat ./build_dir/target-*/linux-*/linux-*/.vermagic)
           echo "Kernel Vermagic: $VERMAGIC"
 
@@ -117,9 +148,10 @@ jobs:
           make package/luci-app-amneziawg/{clean,compile} V=s
           make package/amneziawg-tools/{clean,compile} V=s
 
+      # 11. Prepare Artifacts
       - name: Prepare Artifacts
         run: |
-          cd /work/project/friendlywrt
+          cd friendlywrt/project/friendlywrt
           tag_name=${GITHUB_REF_NAME}
           mkdir -p awgrelease
           postfix="${tag_name}_v${{ matrix.build_env.tag }}_${{ matrix.build_env.pkgarch}}_${{ matrix.build_env.target}}_${{ matrix.build_env.subtarget}}"
@@ -127,7 +159,8 @@ jobs:
           cp bin/packages/${{ matrix.build_env.pkgarch }}/awgopenwrt/luci-app-amneziawg_*.ipk awgrelease/luci-app-amneziawg_${postfix}.ipk
           cp bin/targets/${{ matrix.build_env.target}}/${{ matrix.build_env.subtarget}}/packages/kmod-amneziawg_*.ipk awgrelease/kmod-amneziawg_${postfix}.ipk
 
+      # 12. Release
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
-          files: /work/project/friendlywrt/awgrelease/*.ipk
+          files: friendlywrt/project/friendlywrt/awgrelease/*.ipk
